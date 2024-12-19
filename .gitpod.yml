@@ -1,0 +1,27 @@
+tasks:
+  - name: Install Docker and Nextflow
+    init: |
+      sudo apt-get update
+      # Install Docker
+      sudo apt-get install -y docker.io
+
+       # Install Nextflow
+      curl -s https://get.nextflow.io | bash
+      sudo mv nextflow /usr/local/bin/
+
+
+      # Install Miniconda
+      wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+      bash Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda
+      echo 'export PATH=$HOME/miniconda/bin:$PATH' >> ~/.bashrc
+      source ~/.bashrc
+
+      # Update conda and create the environment
+      conda init
+      conda update -n base -c defaults conda -y
+      conda create -n myenv python=3.8 -y
+
+  - name: Activate Conda Environment
+    command: |
+      source ~/.bashrc
+      conda activate myenv
