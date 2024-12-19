@@ -14,4 +14,4 @@ work/
 results/
 .nextflow/history
 miniconda.sh
-data/refGenome
+data/refGenome/*
