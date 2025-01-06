@@ -15,8 +15,10 @@ params.blacklist_path = params.blacklist_path ?: "$PWD/resources/blacklist/mm10-
 params.genome_size = params.genome_size ?: "mm" // Genome size for MACS2 (mm for mouse)
 params.bowtie2_threads = params.bowtie2_threads ?: 4 // Number of threads for Bowtie2
 params.bowtie2_index = params.bowtie2_index ?: "$PWD/results/bowtie2_index" // Bowtie2 index directory
-params.skip_alignment  = params.skip_alignment ?: false
-params.test_mode       = params.test_mode ?: false
+params.keep_dup = params.keep_dup ?: "auto" // MACS2 keep-dup parameter
+params.skip_alignment = params.skip_alignment ?: false
+params.test_mode = params.test_mode ?: false
+params.read_type = params.read_type ?: 'paired' // 'paired' or 'single'
 
 // -----------------------------
 // 2. Validate Parameters
@@ -35,9 +37,10 @@ if (!file(params.gtf).exists()) {
 
 
 // Log Pipeline Information
-log.info """\
+log.info """
 ChIP-Seq Analysis Pipeline - FastQC, TrimGalore, Bowtie2Index, Bowtie2Align, Peak Calling (MACS2), Blacklist Filtering, Peak Annotation (ChIPseeker), and MultiQC
 Reads: ${params.reads}
+Read type: ${params.read_type}
 Output directory: ${params.outdir}
 Genome: ${params.genome}
 GTF: ${params.gtf}
@@ -46,6 +49,8 @@ Blacklist Path: ${params.blacklist_path}
 Genome Size: ${params.genome_size}
 Bowtie2 Threads: ${params.bowtie2_threads}
 Bowtie2 Index: ${params.bowtie2_index}
+Keep Duplication: ${params.keep_dup}
+Skip Alignment: ${params.skip_alignment}
 Test mode : ${params.test_mode}
 """
 
@@ -61,37 +66,33 @@ if (!file(params.outdir).exists()) {
 // 3.1 Download Blacklist Regions
 process DownloadBlacklist {
     tag "DownloadBlacklist"
-    container 'biocontainers/wget:1.21.3--hda2e75f_0'
     publishDir "${params.outdir}/blacklist", mode: 'copy'
 
     output:
-    path "mm10-blacklist.v2.bed" into blacklist_channel
+    path "mm10-blacklist.v2.bed", emit: blacklist_channel
 
     script:
     """
-    mkdir -p blacklist
-    wget -O blacklist/mm10-blacklist.v2.bed.gz ${params.blacklist_url}
-    gunzip blacklist/mm10-blacklist.v2.bed.gz
-    mv blacklist/mm10-blacklist.v2.bed blacklist/
+    wget -O mm10-blacklist.v2.bed.gz ${params.blacklist_url}
+    gunzip mm10-blacklist.v2.bed.gz
     """
 }
 
 // 3.2 FastQC Process for Quality Control of Reads
 process FastQC {
     tag "FastQC on ${sample_id}"
-    container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
     publishDir "${params.outdir}/qc", mode: 'copy'
 
     input:
     tuple val(sample_id), path(reads)
 
     output:
-    tuple val(sample_id), path("*_fastqc.zip"), path("*_fastqc.html"), emit: reports
+    path "*.html", emit: reports_html
+    path "*.zip", emit: reports_zip
 
     script:
     """
-    mkdir -p qc
-    fastqc -o qc ${reads[0]} ${reads[1]}
+    fastqc -t ${task.cpus} -o . ${reads.join(' ')}
     echo "FASTQC completed for ${sample_id}"
     """
 }
@@ -99,161 +100,300 @@ process FastQC {
 // 3.3 TrimGalore Process for Trimming Low-Quality Reads
 process TrimGalore {
     tag "TrimGalore on ${sample_id}"
-    container 'quay.io/biocontainers/trim-galore:0.6.6--hdfd78af_1'
     publishDir "${params.outdir}/trimmed", mode: 'copy'
 
     input:
     tuple val(sample_id), path(reads)
 
     output:
-    tuple val(sample_id), path("${sample_id}_1_trimmed.fq.gz"), path("${sample_id}_2_trimmed.fq.gz"), emit: trimmed_reads
+    tuple val(sample_id), path("*_trimmed.fq.gz"), emit: trimmed_reads
 
     script:
-    """
-    mkdir -p trimmed
-    trim_galore --paired --quality 20 --length 36 --gzip --output_dir trimmed ${reads[0]} ${reads[1]}
-    mv trimmed/${sample_id}_1_val_1.fq.gz trimmed/${sample_id}_1_trimmed.fq.gz
-    mv trimmed/${sample_id}_2_val_2.fq.gz trimmed/${sample_id}_2_trimmed.fq.gz
-    echo "Trimmed Reads completed for ${sample_id}"
-    """
-}
+    if (params.read_type == 'paired') {
+        """
+        trim_galore --paired --cores ${task.cpus} --quality 20 --length 36 --gzip --output_dir . ${reads[0]} ${reads[1]}
+        mv *_val_1.fq.gz ${sample_id}_1_trimmed.fq.gz
+        mv *_val_2.fq.gz ${sample_id}_2_trimmed.fq.gz
+        echo "Trimmed paired-end reads for ${sample_id}"
+        """
+    } else {
+        """
+        trim_galore --cores ${task.cpus} --quality 20 --length 36 --gzip --output_dir . ${reads[0]}
+        echo "Trimmed single-end reads for ${sample_id}"
+        """
+    
+    }
+}  
 
-// 3.4 Creating Bowtie2 Index for Alignment
+// 3.4 Bowtie2 Index Process
 process Bowtie2Index {
     tag "Bowtie2Index"
-    container 'biocontainers/bowtie2:2.4.5--hdfd78af_0'
     publishDir "${params.outdir}/bowtie2_index", mode: 'copy'
 
     input:
     path genome_fasta
 
     output:
-    path("bowtie2_index/*"), emit: bowtie2_index
+    path("genome.*"), emit: bowtie2_index
 
     script:
     """
-    mkdir -p bowtie2_index
-    bowtie2-build ${genome_fasta} bowtie2_index/genome
+    bowtie2-build --threads ${task.cpus} ${genome_fasta} genome
+    echo "Genome build completed for ${genome_fasta}"
     """
 }
 
-// 3.5 Bowtie2 Alignment Process for Creating Aligned BAM Files
+// 3.5 Bowtie2 Alignment Process
 process Bowtie2Align {
     tag "Bowtie2Align on ${sample_id}"
-    container 'biocontainers/bowtie2:2.4.5--hdfd78af_0'
     publishDir "${params.outdir}/aligned", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(trimmed_reads), path(bowtie2_index)
+    tuple val(sample_id), path(trimmed_reads), val(bowtie2_index_prefix)
 
     output:
-    tuple val(sample_id), path("aligned/${sample_id}.bam"), emit: aligned_bam
-    tuple val(sample_id), path("aligned/${sample_id}.bam.bai"), emit: bam_index
+    tuple val(sample_id), path("${sample_id}.bam"), emit: bam_output
+
+    script:
+    if (params.read_type == 'paired') {
+        """
+        bowtie2 -p ${params.bowtie2_threads} -x ${bowtie2_index_prefix} \
+                -1 ${trimmed_reads[0]} -2 ${trimmed_reads[1]} \
+            | samtools view -bS - > ${sample_id}.bam
+        echo "Bowtie2 alignment completed for ${sample_id}"
+        """
+    } else {
+        """
+        bowtie2 -p ${params.bowtie2_threads} -x ${bowtie2_index_prefix} \
+                -U ${trimmed_reads[0]} \
+            | samtools view -bS - > ${sample_id}.bam
+        echo "Bowtie2 alignment completed for ${sample_id}"
+        """
+    }
+}
+
+// 3.6 Sort & Index Bam Process
+process SortIndexBam {
+    tag "SortIndexBam on ${sample_id}"
+    publishDir "${params.outdir}/aligned", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam_output)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.sorted.bam"), emit: sorted_bam
 
     script:
     """
-    mkdir -p aligned
-    bowtie2 -p ${params.bowtie2_threads} -x bowtie2_index/genome -1 ${trimmed_reads[0]} -2 ${trimmed_reads[1]} \
-        | samtools view -bS - > aligned/${sample_id}.bam
-    samtools sort aligned/${sample_id}.bam -o aligned/${sample_id}.sorted.bam
-    samtools index aligned/${sample_id}.sorted.bam
-    mv aligned/${sample_id}.sorted.bam aligned/${sample_id}.bam
-    rm aligned/${sample_id}.sorted.bam
-    echo "Bowtie2 alignment completed for ${sample_id}"
+    samtools sort -@ ${task.cpus} -m 1G -l 9 -o ${sample_id}.sorted.bam ${bam_output}
+    samtools index ${sample_id}.sorted.bam
+    echo "Samtools sorting and indexing completed for ${sample_id}"
     """
 }
 
-// 3.6 Post-Alignment Processing: Sorting and Removing Duplicates
+
+// 3.7 Post-Alignment Processing: Removing Duplicates
 process PostAlignChIPseq {
     tag "PostAlignChIPseq on ${sample_id}"
-    container 'biocontainers/samtools:1.15--hdfd78af_0'
     publishDir "${params.outdir}/aligned", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam) from aligned_bam
+    tuple val(sample_id), path(bam)
 
     output:
-    tuple val(sample_id), path("aligned/${sample_id}.dedup.bam") emit: dedup_bam
+    tuple val(sample_id), path("${sample_id}.dedup.bam"), emit: dedup_bam
 
     script:
     """
-    samtools sort -o aligned/${sample_id}.sorted.bam ${bam}
-    samtools index aligned/${sample_id}.sorted.bam
-    picard MarkDuplicates I=aligned/${sample_id}.sorted.bam O=aligned/${sample_id}.dedup.bam M=aligned/${sample_id}.dedup_metrics.txt REMOVE_DUPLICATES=true
-    samtools index aligned/${sample_id}.dedup.bam
-    rm aligned/${sample_id}.sorted.bam aligned/${sample_id}.sorted.bam.bai
+    picard MarkDuplicates I=${bam} O=${sample_id}.dedup.bam M=${sample_id}.dedup_metrics.txt REMOVE_DUPLICATES=true
     echo "Post-alignment processing completed for ${sample_id}"
     """
 }
 
-// 3.7 Peak Calling with MACS2
-process PeakCalling {
-    tag "MACS2 Peak Calling on ${sample_id}"
-    container 'biocontainers/macs2:2.2.7.1--pyhdfd78af_0'
-    publishDir "${params.outdir}/peaks", mode: 'copy'
+
+// 3.8 Alignment QC Metrics & BAM Indexing
+process AlignmentQCAndIndex {
+    tag "Alignment QC & BAM Indexing on ${sample_id} dedup reads"
+    publishDir "${params.outdir}/aligned", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam) from dedup_bam
-
-    // If you have control samples, include them here
-    // For simplicity, we'll assume no control samples
+    tuple val(sample_id), path(bam)
 
     output:
-    path("peaks/${sample_id}_peaks.narrowPeak") emit: peaks
+    path("${sample_id}_flagstat.txt"), emit: qc_metrics
+    path("${sample_id}.dedup.bam.bai"), emit: bam_index
 
     script:
     """
-    mkdir -p peaks
-    macs2 callpeak -t ${bam} -f BAM -g ${params.genome_size} -n ${sample_id} --outdir peaks --keep-dup all
-    mv peaks/${sample_id}_peaks.narrowPeak peaks/
+    samtools index ${bam}
+    samtools flagstat ${bam} > ${sample_id}_flagstat.txt
+    echo "BAM indexing and QC metrics generated for ${sample_id}"
+    """
+}
+
+// 3.9 Peak Calling with MACS2
+// to do: figure out the control/spike-in sample command
+process PeakCalling {
+    tag "MACS2 Peak Calling on ${sample_id}"
+    publishDir "${params.outdir}/peaks", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_peaks.narrowPeak"), emit: peaks
+    tuple val(sample_id), path("${sample_id}_peaks.xls")
+    tuple val(sample_id), path("${sample_id}_summits.bed")
+
+    script:
+    """
+    macs2 callpeak -t ${bam} -f BAM -g ${params.genome_size} -n ${sample_id} --outdir . --keep-dup ${params.keep_dup} --nolambda --nomodel -q 0.05
     echo "MACS2 peak calling completed for ${sample_id}"
     """
 }
 
-// 3.8 Blacklist Filtering of Peaks
+// 3.10 Blacklist Filtering of Peaks
 process FilterBlacklistedPeaks {
     tag "Blacklist Filtering for ${sample_id}"
-    container 'biocontainers/bedtools:2.30.0--hdfd78af_0'
     publishDir "${params.outdir}/filtered_peaks", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(peak_files) from peaks
-    path blacklist from blacklist_channel
+    tuple val(sample_id), path(peak_files)
+    path blacklist
 
     output:
-    path("filtered_peaks/${sample_id}_filtered.narrowPeak") emit: filtered_peaks
+    tuple val(sample_id), path("${sample_id}_filtered.narrowPeak"), emit: filtered_peaks
 
     script:
     """
-    mkdir -p filtered_peaks
-    bedtools intersect -v -a ${peak_files} -b ${blacklist} > filtered_peaks/${sample_id}_filtered.narrowPeak
+    bedtools intersect -v -a ${peak_files} -b ${blacklist} > ${sample_id}_filtered.narrowPeak
     echo "Blacklist filtering completed for ${sample_id}"
     """
 }
 
-// 3.9 Peak Annotation with ChIPseeker
+// 3.11 Peak Annotation with HOMER
 process AnnotatePeaks {
-    tag "Peak Annotation for ${sample_id}"
-    container 'biocontainers/r-base:4.1.0--hdfd78af_0'
+    tag "Annotate Peaks with HOMER for ${sample_id}"
     publishDir "${params.outdir}/annotated_peaks", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(filtered_peak) from filtered_peaks
+    tuple val(sample_id), path(peak_files)
+    path genome_fasta
 
     output:
-    path("annotated_peaks/${sample_id}_annotated.txt") emit: annotated_peaks
+    path("${sample_id}_annotated_peaks.txt"), emit: homer_annotated
 
     script:
     """
-    Rscript annotate_peaks.R ${filtered_peak} annotated_peaks/
-    echo "Peak annotation completed for ${sample_id}"
+    annotatePeaks.pl ${peak_files} ${genome_fasta} > ${sample_id}_annotated_peaks.txt
+    echo "HOMER annotation completed for ${sample_id}"
     """
 }
 
-// 3.10 MultiQC for Aggregating Reports
+// 3.13  Custom Genome reference for Motif Analysis with HOMER - to do, requires a custom container with homer and samtools
+// process CreateHomerGenome {
+//     tag "CreateHomerGenome for ${params.genome}"
+//     publishDir "${params.outdir}/homer_genomes", mode: 'copy'
+
+//     input:
+//     path genome_fasta
+
+//     output:
+//     path "homer_genome", emit: homer_genome_dir
+
+//     script:
+//     """
+//     mkdir -p homer_genome
+//     cp ${genome_fasta} homer_genome/genome.fa
+//     samtools faidx homer_genome/genome.fa
+//     cut -f1,2 homer_genome/genome.fa.fai > homer_genome/chrom.sizes
+
+//     perl /usr/local/share/homer/configureHomer.pl -install homer_genome
+//     echo "HOMER genome directory created for ${genome_fasta}"
+//     """
+// }
+
+// 3.13  Motif Analysis with HOMER
+process MotifAnalysis {
+    tag "MotifAnalysis on ${sample_id}"
+    publishDir "${params.outdir}/motifs", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(peaks)
+
+    output:
+    path "${sample_id}_motifs/knownResults.html", emit: motif_results
+
+    script:
+    """
+    mkdir -p ${sample_id}_motifs
+    perl /usr/local/share/homer/.//configureHomer.pl -install mm10
+    findMotifsGenome.pl ${peaks} mm10 ${sample_id}_motifs -size 200 -mask
+    echo "Motif analysis completed for ${sample_id}"
+    """
+}
+
+
+// 3.13 Bam Coverage (BigWig file generation) with deepTools
+process BamCoverage {
+    tag "bamCoverage on ${sample_id}"
+    publishDir "${params.outdir}/bigwig", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.bw"), emit: bigwig
+
+    script:
+    """
+    bamCoverage -b ${bam} -o ${sample_id}.bw --normalizeUsing CPM --numberOfProcessors ${task.cpus}
+    echo "BigWig file generated for ${sample_id}"
+    """
+}
+
+
+// 3.14 Multi Bigwig Summary with deepTools
+process MultiBigwigSummary {
+    tag "multiBigwigSummary"
+    publishDir "${params.outdir}/correlation", mode: 'copy'
+
+    input:
+    path bigwigs from bigwig.collect()
+
+    output:
+    path "correlation_matrix.npz", emit: summary_matrix
+
+    script:
+    """
+    multiBigwigSummary bins -b ${bigwigs.join(' ')} -o correlation_matrix.npz --numberOfProcessors ${task.cpus}
+    """
+}
+
+// 3.15 Correlation Analysis with deepTools
+process PlotCorrelation {
+    tag "plotCorrelation"
+    publishDir "${params.outdir}/correlation", mode: 'copy'
+
+    input:
+    path summary_matrix from MultiBigwigSummary.summary_matrix
+
+    output:
+    path "correlation_heatmap.png", emit: correlation_plot
+    path "correlation_matrix.tsv", emit: correlation_matrix
+
+    script:
+    """
+    plotCorrelation --corData ${summary_matrix} --corMethod pearson --skipZeros \
+                    --whatToPlot heatmap --plotFile correlation_heatmap.png \
+                    --outFileCorMatrix correlation_matrix.tsv
+    """
+}
+
+
+// 3.16 MultiQC for Aggregating Reports
 process MultiQC {
     tag "MultiQC"
-    container 'quay.io/biocontainers/multiqc:1.11--pyhdfd78af_0'
     publishDir "${params.outdir}/multiqc", mode: 'copy'
 
     input:
@@ -263,17 +403,16 @@ process MultiQC {
     path "annotated_peaks/*.annotated.txt" from annotated_peaks
 
     output:
-    path("multiqc_report.html") emit: multiqc_report
+    path("multiqc_report.html"), emit: multiqc_report
 
     script:
     """
-    mkdir -p multiqc
-    multiqc . -o multiqc
+    multiqc . -o .
     echo "MultiQC report generated"
     """
 }
 
-// 3.11 Test Process for Validation (Optional)
+// 3.17 Test Process for Validation (Optional)
 process TestProcess {
     tag 'TestProcess'
     publishDir "${params.outdir}/test_output", mode: 'copy'
@@ -290,39 +429,55 @@ process TestProcess {
 // -----------------------------
 
 workflow {
-    // Define channels
-    reads_ch = Channel.fromFilePairs(params.reads, checkIfExists: true, size: 2)
+    // Define channels for input reads and genome
+    reads_ch = Channel.fromFilePairs(params.reads, checkIfExists: true, size: params.read_type == 'paired' ? 2 : 1)
     genome_ch = Channel.value(file(params.genome))
     gtf_ch = Channel.value(file(params.gtf))
     blacklist_ch = DownloadBlacklist()
 
-    // Bowtie2 Indexing
-    bowtie2_index_ch = Bowtie2Index(genome_ch)
+    // Step 1: Bowtie2 Indexing
+    bowtie2_index_ch = Bowtie2Index(genome_ch).map { index_paths -> index_paths[0].parent + '/genome' }
 
-    // FastQC
+    // Step 2: FastQC
     fastqc_ch = reads_ch.map { sample_id, files -> tuple(sample_id, files) }
     FastQC(fastqc_ch)
 
-    // Trim Galore
+    // Step 3: Trim Galore
     trimmed_ch = TrimGalore(reads_ch)
 
-    // Bowtie2 Alignment
-    bowtie2_align_input = trimmed_ch.combine(bowtie2_index_ch).map { sample_id, files, bowtie2_index -> tuple(sample_id, files, bowtie2_index) }
-    aligned_output = Bowtie2Align(bowtie2_align_input)
+    // Step 4: Bowtie2 Alignment
+    bowtie2_align_input = trimmed_ch.combine(bowtie2_index_ch)
+    bam_output = Bowtie2Align(bowtie2_align_input)
 
-    // Post-Alignment Processing
-    dedup_bam = PostAlignChIPseq(aligned_output)
+    // Step 5: Sorting and Indexing BAM
+    sorted_bam = SortIndexBam(bam_output)
 
-    // Peak Calling
-    peaks = PeakCalling(dedup_bam)
+    // Step 6: Post-Alignment Processing (Removing Duplicates)
+    dedup_bam = PostAlignChIPseq(sorted_bam)
 
-    // Blacklist Filtering
-    filtered_peaks = FilterBlacklistedPeaks(peaks, blacklist_ch)
+    // Step 7: Alignment QC and BAM Indexing
+    qc_metrics, bam_index = AlignmentQCAndIndex(dedup_bam)
 
-    // Peak Annotation
-    // annotated_peaks = AnnotatePeaks(filtered_peaks)
+    // Step 8: Peak Calling with MACS2
+    peaks_ch = PeakCalling(dedup_bam)
 
-    // // MultiQC
+    // Step 9: Blacklist Filtering
+    filtered_peaks = FilterBlacklistedPeaks(peaks_ch.peaks, blacklist_ch)
+
+    // Step 10: Annotate peaks with HOMER
+    annotated_peaks = AnnotatePeaks(filtered_peaks, genome_ch)
+
+    // Step 11: Motif Analysis with HOMER
+    motif_results = MotifAnalysis(filtered_peaks)
+
+    // Step 12: BigWig Generation
+    bigwig = BamCoverage(bam_index)
+
+    // Optional Correlation Analysis
+    // summary_matrix = MultiBigwigSummary(bigwig.collect())
+    // correlation_plot = PlotCorrelation(summary_matrix)
+
+    // Optional MultiQC
     // MultiQC(fastqc_ch, peaks, filtered_peaks, annotated_peaks)
 
     // Optional Test Process
