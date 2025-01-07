@@ -116,9 +116,6 @@ Performs motif analysis to identify enriched motifs in the peak regions.
 ### 11. Correlation Analysis (deepTools)
 Generates correlation matrices and plots based on the coverage data.
 
-### 12. MultiQC Report
-Aggregates all reports into a single HTML report using MultiQC.
-
 ## Output Structure
 
 The pipeline generates the following output directories:
@@ -136,7 +133,6 @@ results/
 ├── peaks/              # MACS2 peak calling results
 ├── qc/                 # FastQC quality control reports
 ├── trimmed/            # Trimmed reads
-└── multiqc/            # MultiQC report
 ```
 
 ## Usage
