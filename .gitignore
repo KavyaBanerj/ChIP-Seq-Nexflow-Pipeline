@@ -29,4 +29,4 @@ data/reads/*
 .nextflow.log.8
 .nextflow.log.9
 .nexflow/*
-.nextflow/cache/*
+.nextflow/cache/*data/refGenome/mm10.fa
