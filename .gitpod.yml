@@ -18,9 +18,10 @@ tasks:
       # Update conda and create the environment
       conda init
       conda update -n base -c defaults conda -y
-      conda create -n myenv python=3.8 -y
+      conda create -n sra-toolkit python=3.8 -y
 
   - name: Activate Conda Environment
     command: |
       source ~/.bashrc
-      conda activate myenv
+      conda init
+      conda activate sra-toolkit 

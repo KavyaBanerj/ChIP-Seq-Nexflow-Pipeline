@@ -121,7 +121,6 @@ process TrimGalore {
         trim_galore --cores ${task.cpus} --quality 20 --length 36 --gzip --output_dir . ${reads[0]}
         echo "Trimmed single-end reads for ${sample_id}"
         """
-    
     }
 }  
 
@@ -191,7 +190,6 @@ process SortIndexBam {
     """
 }
 
-
 // 3.7 Post-Alignment Processing: Removing Duplicates
 process PostAlignChIPseq {
     tag "PostAlignChIPseq on ${sample_id}"
@@ -210,7 +208,6 @@ process PostAlignChIPseq {
     """
 }
 
-
 // 3.8 Alignment QC Metrics & BAM Indexing
 process AlignmentQCAndIndex {
     tag "Alignment QC & BAM Indexing on ${sample_id} dedup reads"
@@ -220,8 +217,8 @@ process AlignmentQCAndIndex {
     tuple val(sample_id), path(bam)
 
     output:
-    path("${sample_id}_flagstat.txt"), emit: qc_metrics
-    path("${sample_id}.dedup.bam.bai"), emit: bam_index
+    tuple val(sample_id), path("${sample_id}.dedup.bam.bai"), emit: bam_index
+    path("${sample_id}_flagstat.txt")
 
     script:
     """
@@ -333,14 +330,13 @@ process MotifAnalysis {
     """
 }
 
-
 // 3.13 Bam Coverage (BigWig file generation) with deepTools
 process BamCoverage {
     tag "bamCoverage on ${sample_id}"
     publishDir "${params.outdir}/bigwig", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam)
+    tuple val(sample_id), path(bam), path(bam_index)
 
     output:
     tuple val(sample_id), path("${sample_id}.bw"), emit: bigwig
@@ -351,7 +347,6 @@ process BamCoverage {
     echo "BigWig file generated for ${sample_id}"
     """
 }
-
 
 // 3.14 Multi Bigwig Summary with deepTools
 process MultiBigwigSummary {
@@ -390,7 +385,6 @@ process PlotCorrelation {
     """
 }
 
-
 // 3.16 MultiQC for Aggregating Reports
 process MultiQC {
     tag "MultiQC"
@@ -424,6 +418,11 @@ process TestProcess {
     """
 }
 
+/// Create output directories if they do not exist
+if (!file(params.outdir).exists()) {
+    file(params.outdir).mkdirs()
+}
+
 // -----------------------------
 // 4. Define Workflow
 // -----------------------------
@@ -436,7 +435,7 @@ workflow {
     blacklist_ch = DownloadBlacklist()
 
     // Step 1: Bowtie2 Indexing
-    bowtie2_index_ch = Bowtie2Index(genome_ch).map { index_paths -> index_paths[0].parent + '/genome' }
+    bowtie2_index_ch = Bowtie2Index(genome_ch).map { index_paths -> "${index_paths[0].parent}/genome" }
 
     // Step 2: FastQC
     fastqc_ch = reads_ch.map { sample_id, files -> tuple(sample_id, files) }
@@ -456,7 +455,7 @@ workflow {
     dedup_bam = PostAlignChIPseq(sorted_bam)
 
     // Step 7: Alignment QC and BAM Indexing
-    qc_metrics, bam_index = AlignmentQCAndIndex(dedup_bam)
+    bam_index = AlignmentQCAndIndex(dedup_bam)
 
     // Step 8: Peak Calling with MACS2
     peaks_ch = PeakCalling(dedup_bam)
@@ -468,17 +467,20 @@ workflow {
     annotated_peaks = AnnotatePeaks(filtered_peaks, genome_ch)
 
     // Step 11: Motif Analysis with HOMER
-    motif_results = MotifAnalysis(filtered_peaks)
+    motif_results = MotifAnalysis(filtered_peaks) 
 
+    // BigWig generation happens before peak calling and does not involve blacklist filtering.
+    // It provides a continuous signal track for visualization.
     // Step 12: BigWig Generation
-    bigwig = BamCoverage(bam_index)
+    bigwig_input = dedup_bam.dedup_bam.join(bam_index.bam_index, by: 0) // Using 'emit' creates named channels, so we need to access them with '.label' to use in join or other operators
+    bigwig = BamCoverage(bigwig_input)
 
-    // Optional Correlation Analysis
-    // summary_matrix = MultiBigwigSummary(bigwig.collect())
-    // correlation_plot = PlotCorrelation(summary_matrix)
+    // Correlation Analysis
+    summary_matrix = MultiBigwigSummary(bigwig.collect())
+    correlation_plot = PlotCorrelation(summary_matrix)
 
-    // Optional MultiQC
-    // MultiQC(fastqc_ch, peaks, filtered_peaks, annotated_peaks)
+    Optional MultiQC
+    MultiQC(fastqc_ch, peaks, filtered_peaks, annotated_peaks)
 
     // Optional Test Process
     if (params.test_mode) {
