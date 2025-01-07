@@ -27,7 +27,7 @@ This ChIP-Seq analysis pipeline performs the following steps:
 
 1. Clone this repository:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/KavyaBanerj/ChIP-Seq-Nexflow-Pipeline/tree/main
    cd <repository-directory>
    ```
 2. Install Nextflow:
@@ -155,7 +155,7 @@ You can customize the pipeline by modifying the parameters in the `main.nf` file
 Example:
 
 ```bash
-nextflow run main.nf --reads "data/*.fastq.gz"  --skip_alignment true --read_type paired
+nextflow run main.nf --reads "data/*.fastq.gz"  --read_type paired
 ```
 
 ## Test Mode
