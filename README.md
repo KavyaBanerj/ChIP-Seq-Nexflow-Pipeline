@@ -22,7 +22,6 @@ This ChIP-Seq analysis pipeline performs the following steps:
     - Generates BigWig files for visualization.
     - Computes coverage matrices and plots coverage profiles.
 11. **Correlation Analysis**: Generates correlation matrices and plots.
-12. **MultiQC Report**: Aggregates reports from different steps into a single HTML report.
 
 ## Installation
 
