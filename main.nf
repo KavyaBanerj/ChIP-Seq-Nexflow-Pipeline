@@ -348,7 +348,53 @@ process BamCoverage {
     """
 }
 
-// 3.14 Multi Bigwig Summary with deepTools
+// 3.14 Plot Coverage Matrix (BigWig file generation) with deepTools
+process ComputeMatrixPerSample {
+    tag "ComputeMatrix for ${sample_id}"
+    publishDir "${params.outdir}/matrix", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bigwig), path(peaks)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_matrix.gz"), emit: coverage_matrix
+
+    script:
+    """
+    computeMatrix scale-regions \
+        -S ${bigwig} \
+        -R ${peaks} \
+        --numberOfProcessors ${task.cpus} \
+        --outFileName ${sample_id}_matrix.gz \
+        --outFileNameMatrix ${sample_id}_matrix.tab \
+        --regionBodyLength 5000 \
+        --beforeRegionStartLength 3000 \
+        --afterRegionStartLength 3000
+    echo "Matrix computation completed for ${sample_id}"
+    """
+}
+
+// 3.15 Plot Coverage Profile (BigWig file generation) with deepTools
+process PlotCoverageProfilePerSample {
+    tag "PlotCoverageProfile for ${sample_id}"
+    publishDir "${params.outdir}/coverage_plots", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(coverage_matrix)
+
+    output:
+    path "coverage_profile_${sample_id}.png"
+
+    script:
+    """
+    plotProfile -m ${coverage_matrix} -out coverage_profile_${sample_id}.png \
+        --plotTitle "Coverage Profile: ${sample_id}" --plotHeight 6 --plotWidth 8
+    echo "Coverage profile plot generated for ${sample_id}"
+    """
+}
+
+
+// 3.17 Multi Bigwig Summary with deepTools
 process MultiBigwigSummary {
     tag "multiBigwigSummary"
     publishDir "${params.outdir}/correlation", mode: 'copy'
@@ -365,7 +411,7 @@ process MultiBigwigSummary {
     """
 }
 
-// 3.15 Correlation Analysis with deepTools
+// 3.18 Correlation Analysis with deepTools
 process PlotCorrelation {
     tag "plotCorrelation"
     publishDir "${params.outdir}/correlation", mode: 'copy'
@@ -385,7 +431,7 @@ process PlotCorrelation {
     """
 }
 
-// 3.16 MultiQC for Aggregating Reports
+// 3.19 MultiQC for Aggregating Reports
 process MultiQC {
     tag "MultiQC"
     publishDir "${params.outdir}/multiqc", mode: 'copy'
@@ -406,7 +452,7 @@ process MultiQC {
     """
 }
 
-// 3.17 Test Process for Validation (Optional)
+// 3.20 Test Process for Validation (Optional)
 process TestProcess {
     tag 'TestProcess'
     publishDir "${params.outdir}/test_output", mode: 'copy'
@@ -469,18 +515,22 @@ workflow {
     // Step 11: Motif Analysis with HOMER
     motif_results = MotifAnalysis(filtered_peaks) 
 
-    // BigWig generation happens before peak calling and does not involve blacklist filtering.
     // It provides a continuous signal track for visualization.
     // Step 12: BigWig Generation
     bigwig_input = dedup_bam.dedup_bam.join(bam_index.bam_index, by: 0) // Using 'emit' creates named channels, so we need to access them with '.label' to use in join or other operators
     bigwig = BamCoverage(bigwig_input)
 
-    // Correlation Analysis
-    summary_matrix = MultiBigwigSummary(bigwig.collect())
-    correlation_plot = PlotCorrelation(summary_matrix)
+    // Step 13: Compute Coverage Matrix and Plot Coverage Profile
+    bigwig_peaks_input = bigwig.join(filtered_peaks, by: 0) // Join by sample ID
+    coverage_matrix = ComputeMatrixPerSample(bigwig_peaks_input)
+    PlotCoverageProfilePerSample(coverage_matrix)
 
-    Optional MultiQC
-    MultiQC(fastqc_ch, peaks, filtered_peaks, annotated_peaks)
+    // Correlation Analysis
+    // summary_matrix = MultiBigwigSummary(bigwig.collect())
+    // correlation_plot = PlotCorrelation(summary_matrix)
+
+    //  MultiQC
+    // MultiQC(fastqc_ch, peaks_ch.peaks, filtered_peaks, annotated_peaks)
 
     // Optional Test Process
     if (params.test_mode) {
